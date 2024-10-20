@@ -1,8 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:intl/intl.dart';
-import 'db_helper.dart';
-import 'package:gen_chat/message.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const MyApp());
@@ -14,13 +15,55 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AI Chat',
+      title: 'Flutter Demo',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
-      home: const ChatScreen(),
+      home: const MainScreen(),
+    );
+  }
+}
+
+class MainScreen extends StatefulWidget {
+  const MainScreen({super.key});
+
+  @override
+  State<MainScreen> createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  int _currentIndex = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: const [
+          ChatScreen(),
+          HistoryScreen(),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        onTap: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.chat),
+            label: 'Chat',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.history),
+            label: 'History',
+          ),
+        ],
+      ),
     );
   }
 }
@@ -37,18 +80,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _promptInput = TextEditingController();
 
   static const apiKey = "AIzaSyBuOxyDHjX167NOaz-fFb24CVhQj31D9-k";
-  late final GenerativeModel model;
+  final model = GenerativeModel(model: 'gemini-pro', apiKey: apiKey);
+
   List<Message> _messages = [];
 
-  @override
-  void initState() {
-    super.initState();
-    model = GenerativeModel(model: 'gemini-pro', apiKey: apiKey);
-  }
-
   Future<void> sendMessage() async {
-    if (_userInput.text.isEmpty) return;
-
     final userMessage = _userInput.text;
     final prompt = _promptInput.text.isEmpty ? "Plan for Travel" : _promptInput.text;
 
@@ -58,111 +94,54 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.add(Message(isUser: true, message: userMessage, date: DateTime.now()));
     });
 
-    try {
-      final content = [Content.text(fullPrompt)];
-      final response = await model.generateContent(content);
+    final content = [Content.text(fullPrompt)];
+    final response = await model.generateContent(content);
 
-      setState(() {
-        _messages.add(Message(isUser: false, message: response.text ?? "No response", date: DateTime.now()));
-      });
-    } catch (e) {
-      print("Error generating content: $e");
-      setState(() {
-        _messages.add(Message(isUser: false, message: "Error: Unable to generate response", date: DateTime.now()));
-      });
-    }
+    setState(() {
+      _messages.add(Message(isUser: false, message: response.text ?? "", date: DateTime.now()));
+    });
 
     _userInput.clear();
+    _promptInput.clear();
+
+    // Save chat after each message
+    await saveChat();
   }
 
   Future<void> saveChat() async {
-    if (_messages.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No messages to save')),
-      );
-      return;
-    }
+    final prefs = await SharedPreferences.getInstance();
+    final chatData = _messages.map((m) => m.toJson()).toList();
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    await prefs.setString('chat_$timestamp', jsonEncode(chatData));
 
-    final title = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Save Chat'),
-        content: TextField(
-          decoration: const InputDecoration(hintText: "Enter a title for this chat"),
-          onSubmitted: (value) => Navigator.of(context).pop(value),
-        ),
-        actions: [
-          TextButton(
-            child: const Text('Cancel'),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          TextButton(
-            child: const Text('Save'),
-            onPressed: () => Navigator.of(context).pop(_promptInput.text),
-          ),
-        ],
-      ),
-    );
+    // Save chat history
+    List<String> history = prefs.getStringList('chat_history') ?? [];
+    history.add('chat_$timestamp');
+    await prefs.setStringList('chat_history', history);
+  }
 
-    if (title != null && title.isNotEmpty) {
-      try {
-        await DatabaseHelper.instance.saveChat(title, _messages);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Chat saved successfully')),
-        );
-      } catch (e) {
-        print("Error saving chat: $e");
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Error saving chat')),
-        );
-      }
+  Future<void> loadChat(String chatKey) async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedChat = prefs.getString(chatKey);
+    if (savedChat != null) {
+      final chatData = jsonDecode(savedChat) as List;
+      setState(() {
+        _messages = chatData.map((m) => Message.fromJson(m)).toList();
+      });
     }
   }
 
-  void viewSavedChats() async {
-    try {
-      final savedChats = await DatabaseHelper.instance.getSavedChats();
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Saved Chats'),
-          content: SizedBox(
-            width: double.maxFinite,
-            height: 300, // Set a fixed height or use MediaQuery for responsiveness
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: savedChats.length,
-              itemBuilder: (context, index) {
-                final chat = savedChats[index];
-                return ListTile(
-                  title: Text(chat['title'] as String),
-                  subtitle: Text(DateFormat('yyyy-MM-dd HH:mm').format(DateTime.parse(chat['date'] as String))),
-                  onTap: () async {
-                    final messages = await DatabaseHelper.instance.getChatMessages(chat['id'] as int);
-                    if (!mounted) return;
-                    setState(() {
-                      _messages = messages.cast<Message>();
-                    });
-                    Navigator.of(context).pop();
-                  },
-                );
-              },
-            ),
-          ),
-          actions: [
-            TextButton(
-              child: const Text('Close'),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      print("Error viewing saved chats: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Error loading saved chats')),
-      );
+  @override
+  void initState() {
+    super.initState();
+    loadLatestChat();
+  }
+
+  Future<void> loadLatestChat() async {
+    final prefs = await SharedPreferences.getInstance();
+    List<String> history = prefs.getStringList('chat_history') ?? [];
+    if (history.isNotEmpty) {
+      await loadChat(history.last);
     }
   }
 
@@ -183,28 +162,25 @@ class _ChatScreenState extends State<ChatScreen> {
             icon: const Icon(Icons.save),
             onPressed: saveChat,
           ),
-          IconButton(
-            icon: const Icon(Icons.history),
-            onPressed: viewSavedChats,
-          ),
         ],
       ),
       body: Container(
         decoration: BoxDecoration(
           image: DecorationImage(
             colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.8), BlendMode.dstATop),
-            image: const NetworkImage('https://i.pinimg.com/564x/35/bd/1b/35bd1b5d2a5392fea1c42a7b5d25398c.jpg'),
+            image: const NetworkImage('https://static.vecteezy.com/system/resources/previews/001/225/154/non_2x/black-low-poly-geometric-background-vector.jpg'),
             fit: BoxFit.cover,
           ),
         ),
         child: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
           children: [
             Expanded(
               child: ListView.builder(
                 itemCount: _messages.length,
                 itemBuilder: (context, index) {
                   final message = _messages[index];
-                  return MessageWidget(message: message);
+                  return Messages(isUser: message.isUser, message: message.message, date: DateFormat('HH:mm').format(message.date));
                 },
               ),
             ),
@@ -227,6 +203,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   Row(
                     children: [
                       Expanded(
+                        flex: 15,
                         child: TextFormField(
                           controller: _userInput,
                           style: const TextStyle(color: Colors.white),
@@ -239,6 +216,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ),
+                      const Spacer(),
                       IconButton(
                         padding: const EdgeInsets.all(12),
                         iconSize: 30,
@@ -262,49 +240,123 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
+class HistoryScreen extends StatefulWidget {
+  const HistoryScreen({super.key});
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  List<String> chatHistory = [];
+
+  @override
+  void initState() {
+    super.initState();
+    loadChatHistory();
+  }
+
+  Future<void> loadChatHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      chatHistory = prefs.getStringList('chat_history') ?? [];
+    });
+  }
+
+  Future<void> loadChat(String chatKey) async {
+    final chatScreen = context.findAncestorStateOfType<_ChatScreenState>();
+    if (chatScreen != null) {
+      await chatScreen.loadChat(chatKey);
+      Navigator.of(context).pop(); // Close the history screen
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Chat History'),
+      ),
+      body: ListView.builder(
+        itemCount: chatHistory.length,
+        itemBuilder: (context, index) {
+          final chatKey = chatHistory[index];
+          final timestamp = int.parse(chatKey.split('_')[1]);
+          final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          return ListTile(
+            title: Text('Chat from ${DateFormat('yyyy-MM-dd HH:mm').format(date)}'),
+            onTap: () => loadChat(chatKey),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class Message {
   final bool isUser;
   final String message;
   final DateTime date;
 
   Message({required this.isUser, required this.message, required this.date});
+
+  Map<String, dynamic> toJson() {
+    return {
+      'isUser': isUser,
+      'message': message,
+      'date': date.toIso8601String(),
+    };
+  }
+
+  factory Message.fromJson(Map<String, dynamic> json) {
+    return Message(
+      isUser: json['isUser'],
+      message: json['message'],
+      date: DateTime.parse(json['date']),
+    );
+  }
 }
 
-class MessageWidget extends StatelessWidget {
-  final Message message;
+class Messages extends StatelessWidget {
+  final bool isUser;
+  final String message;
+  final String date;
 
-  const MessageWidget({super.key, required this.message});
+  const Messages({
+    super.key,
+    required this.isUser,
+    required this.message,
+    required this.date,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(15),
-      margin: EdgeInsets.only(
-        top: 5,
-        bottom: 5,
-        left: message.isUser ? 100 : 10,
-        right: message.isUser ? 10 : 100,
+      margin: const EdgeInsets.symmetric(vertical: 15).copyWith(
+        left: isUser ? 100 : 10,
+        right: isUser ? 10 : 100,
       ),
       decoration: BoxDecoration(
-        color: message.isUser ? Colors.blueAccent : Colors.grey.shade400,
+        color: isUser ? Colors.blueAccent : Colors.grey.shade400,
         borderRadius: BorderRadius.only(
           topLeft: const Radius.circular(10),
-          bottomLeft: message.isUser ? const Radius.circular(10) : Radius.zero,
+          bottomLeft: isUser ? const Radius.circular(10) : Radius.zero,
           topRight: const Radius.circular(10),
-          bottomRight: message.isUser ? Radius.zero : const Radius.circular(10),
+          bottomRight: isUser ? Radius.zero : const Radius.circular(10),
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            message.message,
-            style: TextStyle(fontSize: 16, color: message.isUser ? Colors.white : Colors.black),
+            message,
+            style: TextStyle(fontSize: 16, color: isUser ? Colors.white : Colors.black),
           ),
           Text(
-            DateFormat('HH:mm').format(message.date),
-            style: TextStyle(fontSize: 10, color: message.isUser ? Colors.white70 : Colors.black54),
+            date,
+            style: TextStyle(fontSize: 10, color: isUser ? Colors.white : Colors.black),
           ),
         ],
       ),
